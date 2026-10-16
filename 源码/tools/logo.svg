@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- 照片卡片 -->
+  <rect x="22" y="58" width="160" height="144" rx="24" fill="#0F6E56"/>
+  <!-- 白色图像标记（太阳 + 山） -->
+  <circle cx="72" cy="96" r="18" fill="#FFFFFF"/>
+  <polygon points="46,190 102,126 158,190" fill="#FFFFFF"/>
+  <!-- 时钟角标：呼应"把时间写回文件让相册按序显示" -->
+  <circle cx="200" cy="60" r="40" fill="#EF9F27" stroke="#FFFFFF" stroke-width="6"/>
+  <path d="M200 60 L200 40 M200 60 L222 60" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" fill="none"/>
+  <circle cx="200" cy="60" r="5" fill="#FFFFFF"/>
+</svg>

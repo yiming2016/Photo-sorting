@@ -1,0 +1,40 @@
+# ---- 构建产物（可再生，不入库）----
+dist/
+build/
+*.spec
+out/
+软件/
+
+# ---- Python 缓存 ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+
+# ---- 会话/缓存数据 ----
+.workbuddy/*
+!.workbuddy/memory/
+.workbuddy/memory/*
+!.workbuddy/memory/*.md
+
+# 软件运行时保存的会话状态（含上次打开的来源列表，可再生）
+.photosort_session.photolist
+
+# ---- 系统与编辑器 ----
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+*.tmp
+
+# 残留诊断临时文件（环境进程会重建，仅本地忽略，不影响功能）
+diag_err.txt
+diag_out.txt
+
+# 无头渲染快照（调试/验收用临时产物，不入库）
+_snap_*.png
+_snap_*.json
+_dlg_*.png
