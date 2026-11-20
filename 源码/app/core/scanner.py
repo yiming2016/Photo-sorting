@@ -13,11 +13,24 @@ from .photo import Photo, kind_of
 CHUNK = 40
 
 
+def _work_subdir() -> str:
+    """统一格式副本目录名(扫描必须跳过它)。"""
+    try:
+        from ..merge.norm_paths import WORK_SUBDIR
+        return WORK_SUBDIR
+    except Exception:
+        return "_photosort_norm"
+
+
 def collect_files(folder: str, recursive: bool = False) -> list[str]:
     out: list[str] = []
+    work = _work_subdir()
     if recursive:
         for root, dirs, files in os.walk(folder):
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            # v217: 跳过 _photosort_norm —— 否则副本会被当成新视频加进列表
+            # (再「统一」还会报"不是视频或源文件已不存在")
+            dirs[:] = [d for d in dirs
+                       if not d.startswith(".") and d != work]
             for f in files:
                 if f.startswith("."):
                     continue
@@ -32,7 +45,10 @@ def collect_files(folder: str, recursive: bool = False) -> list[str]:
                         out.append(entry.path)
         except OSError:
             return []
-    keep = [p for p in out if kind_of(p) != "other"]
+    # 兜一层: 任何落在副本目录里的文件都不算素材(直接打开该目录也适用)
+    keep = [p for p in out
+            if kind_of(p) != "other"
+            and work not in p.replace("\\", "/").split("/")[:-1]]
     keep.sort(key=lambda p: os.path.basename(p).lower())
     return keep
 

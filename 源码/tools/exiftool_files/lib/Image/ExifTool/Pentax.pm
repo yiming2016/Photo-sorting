@@ -59,7 +59,7 @@ use Image::ExifTool::Exif;
 use Image::ExifTool::GPS;
 use Image::ExifTool::HP;
 
-$VERSION = '3.63';
+$VERSION = '3.64';
 
 sub CryptShutterCount($$);
 sub PrintFilter($$$);
@@ -2232,7 +2232,16 @@ my %binaryDataAttrs = (
             32768 => 'Standard', #KG (K-3IIIm) (was "n/a" previously - PH)
             32769 => 'Hard', #KG (K-3IIIm)
             32770 => 'Soft', #KG (K-3IIIm)
-            33024 => 'Monochrome', #forum17904 (GR IV Monochrome)
+            #the following from forum17904 (GR IV Monochrome)
+            33024 => 'Standard', 
+            33025 => 'Solid',
+            33026 => 'Soft',
+            33027 => 'High Contrast',
+            33028 => 'Grainy',
+            33029 => 'HDR tone',
+            33024 => 'Custom 1',
+            33024 => 'Custom 2',
+            33024 => 'Custom 3',
         },
     },
     0x0050 => { #PH
@@ -2743,10 +2752,44 @@ my %binaryDataAttrs = (
             },
         },
     },
+    0x0098 => { # https://github.com/richadams/ricoh-gr3-metadata/blob/master/Pentax_0x0098.md
+        Name => 'CropMode',
+        Writable => 'int8u',
+        Count => 3,
+        PrintConv => {
+            '0 0 0' => 'Full',   # (28mm on GRIII)
+            '0 5 0' => 'Medium', # (35mm on GRIII)
+            '0 6 0' => 'Small',  # (50mm on GRIII)
+          # '1 1 0' - seen for Pentax K-1
+        },
+    },
+    0x0099 => { #forum17904
+        Name => 'SnapFocusDistance',
+        Writable => 'int8u',
+        Count => 3,
+        Notes => 'the DOF settings occur in Snap Distance Priority AE or Sn mode',
+        PrintConv => {
+            '1 0 0' => '1 m',
+            '2 0 0' => '1.5 m',
+            '3 0 0' => '2 m',
+            '3 0 1' => '2 m - DOF3',
+            '3 0 2' => '2 m - DOF2',
+            '3 0 3' => '2 m - DOF1',
+            '4 0 0' => '2.5 m',
+            '5 0 0' => '5 m',
+            '6 0 0' => '3.5 m',
+            '7 0 0' => '0.3 m',
+            '255 0 0' => 'inf',
+        },
+    },
     0x009e => { #https://www.dpreview.com/forums/threads/gr-iv-hdf-dng-exif-data.4837151/#post-68693164
         Name => 'HDF', # (Highlight Diffusion Filter)
         Writable => 'int8u',
-        PrintConv => { 0 => 'Off', 1 => 'On' },
+        PrintConv => {
+            0 => 'Off',
+            1 => 'On',
+            2 => 'Red Filter', #forum17904 (GR IV Monochrome)
+        },
     },
     0x0200 => { #5
         Name => 'BlackPoint',
@@ -3117,6 +3160,10 @@ my %binaryDataAttrs = (
     0x0245 => { #29
         Name => 'AFPointInfo',
         SubDirectory => { TagTable => 'Image::ExifTool::Pentax::AFPointInfo' },
+    },
+    0x0247 => {
+        Name => 'ImageControl',
+        SubDirectory => { TagTable => 'Image::ExifTool::Pentax::ImageControl' },
     },
     0x03fe => { #PH
         Name => 'DataDump',
@@ -4861,7 +4908,7 @@ my %binaryDataAttrs = (
         },
         {
             Name => 'BodyBatteryVoltage1', # (static?)
-            Condition => '$$self{Model} =~ /(645D|645Z|K-(1|01|3|5|7|30|50|70|500|r|x|S[12])|KP)\b/ and $$self{Model} !~ /III/',
+            Condition => '$$self{Model} =~ /(645D|645Z|K-(1|01|3|5|7|30|50|70|500|r|x|S[12])|KF|KP)\b/ and $$self{Model} !~ /III/',   #KG: also for K-70 and KF
             Format => 'int16u',
             ValueConv => '$val / 100',
             ValueConvInv => '$val * 100',
@@ -4916,7 +4963,7 @@ my %binaryDataAttrs = (
         },
         {
             Name => 'BodyBatteryVoltage2', # (less than BodyBatteryVoltage1 -- under load?)
-            Condition => '$$self{Model} =~ /(645D|645Z|K-(1|01|3|5|7|30|50|70|500|r|x|S[12])|KP)\b/ and $$self{Model} !~ /III/',
+            Condition => '$$self{Model} =~ /(645D|645Z|K-(1|01|3|5|7|30|50|70|500|r|x|S[12])|KF|KP)\b/ and $$self{Model} !~ /III/',   #KG: also for K-70 and KF
             Format => 'int16u',
             ValueConv => '$val / 100',
             ValueConvInv => '$val * 100',
@@ -5067,7 +5114,7 @@ my %binaryDataAttrs = (
     # 0x0a - values: 00,05,0d,15,86,8e,a6,ae
     0x0b => { #JD
         Name => 'AFPointsInFocus',
-        Condition => '$$self{Model} !~ /(K-(1|3|70|S1|S2)|KP)\b/',  #KG: valid also for K-S1/S2
+        Condition => '$$self{Model} !~ /(K-(1|3|70|S1|S2)|KF|KP)\b/',  #KG: valid also for K-S1/S2 and KF
         Notes => q{
             models other than the K-1, K-3, K-70, KP and K-S1/S2. May report two points
             in focus even though a single AFPoint has been selected, in which case the
@@ -6078,24 +6125,109 @@ my %binaryDataAttrs = (
     },
     4 => {
         Name => 'AFPointsInFocus',
-        Condition => '$$self{Model} =~ /K(P|-1|-70)\b/',
+        Condition => '$$self{Model} =~ /K(F|P|-1|-70)\b/',     #KG: also for K-70
         Format => 'int8u[int(($val{2}+3)/4)]',
         Writable => 0,
         PrintConv => 'Image::ExifTool::Pentax::DecodeAFPoints($val,$$self{NumAFPoints},2,0x02)',
     },
     4.1 => {
         Name => 'AFPointsSelected',
-        Condition => '$$self{Model} =~ /K(P|-1|-70)\b/',
+        Condition => '$$self{Model} =~ /K(F|P|-1|-70)\b/',     #KG: also for K-70
         Format => 'int8u[int(($val{2}+3)/4)]',
         Writable => 0,
         PrintConv => 'Image::ExifTool::Pentax::DecodeAFPoints($val,$$self{NumAFPoints},2,0x03)',
     },
     4.2 => {
         Name => 'AFPointsSpecial',
-        Condition => '$$self{Model} =~ /K(P|-1|-70)\b/',
+        Condition => '$$self{Model} =~ /K(F|P|-1|-70)\b/',     #KG: also for K-70
         Format => 'int8u[int(($val{2}+3)/4)]',
         Writable => 0,
         PrintConv => 'Image::ExifTool::Pentax::DecodeAFPoints($val,$$self{NumAFPoints},2,0x03,0x03)',
+    },
+);
+
+# image control settings (https://github.com/richadams/ricoh-gr3-metadata/blob/master/Pentax_0x0247.md)
+%Image::ExifTool::Pentax::ImageControl = (
+    %binaryDataAttrs,
+    GROUPS => { 0 => 'MakerNotes', 2 => 'Camera' },
+    FORMAT => 'int16s',
+    0 => { Name => 'Saturation', RawConv => '$val == -32768 ? undef : $val' },,
+    1 => { Name => 'Hue', RawConv => '$val == -32768 ? undef : $val' },,
+    2 => { Name => 'HighLowKey', RawConv => '$val == -32768 ? undef : $val' },,
+    3 => { Name => 'Contrast', RawConv => '$val == -32768 ? undef : $val' },,
+    4 => { Name => 'ContrastHighlight', RawConv => '$val == -32768 ? undef : $val' },,
+    5 => { Name => 'ContrastShadow', RawConv => '$val == -32768 ? undef : $val' },,
+    6 => { Name => 'Sharpness', RawConv => '$val == -32768 ? undef : $val' },,
+    8 => { Name => 'RetroToning', RawConv => '$val == -32768 ? undef : $val' },
+    9 => { Name => 'Shading', RawConv => '$val == -32768 ? undef : $val' },,
+    10 => { Name => 'Clarity', RawConv => '$val == -32768 ? undef : $val' },,
+    13 => {
+        Name => 'BWToning',
+        RawConv => '$val == -1 ? undef : $val',
+        PrintConv => {
+            0 => 'Off',
+            1 => 'Sepia',
+            2 => 'Red',
+            3 => 'Green',
+            4 => 'Blue',
+            5 => 'Purple',
+        },
+    },
+    14 => {
+        Name => 'BleachBypassToning',
+        RawConv => '$val == -1 ? undef : $val',
+        PrintConv => {
+            0 => 'Off',
+            1 => 'Cold',
+            2 => 'Warm',
+        },
+    },
+    15 => {
+        Name => 'HDRToning',
+        RawConv => '$val == -1 ? undef : $val',
+        PrintConv => { 0 => 'Off', 1 => 'B&W', 2 => 'Sepia' },
+    },
+    16 => {
+        Name => 'HDRToneLevel',
+        RawConv => '$val == -1 ? undef : $val',
+        PrintConv => { 0 => 'Low', 1 => 'Med', 2 => 'High' },
+    },
+    17 => {
+        Name => 'BWFilter',
+        Format => 'int8u[4]',
+        RawConv => q{
+            my @a = split '', $val;
+            return $a[0] & 0x08 ? undef : $val;
+        },
+        PrintConv => q{
+            my @a = split ' ', $val;
+            my $f = shift @a;
+            return 'Off' unless $f;
+            my $mask = 0x10;
+            my @rtn;
+            foreach ('R','G','B') {
+                my $b = shift @a;
+                $b = -$b if $f & $mask;
+                $mask <<= 1;
+                push @rtn, sprintf("$_%+d%%", $b);
+            }
+            return \@rtn;
+        },
+    },
+    19 => {
+        Name => 'BWGrainEffect',
+        RawConv => '$val == 8 ? undef : $val',
+        PrintConv => {
+            0 => 'Off',
+            1 => '3 (strong)',
+            3 => '2 (medium)',
+            5 => '1 (weak)',
+        },
+    },
+    21 => {
+        Name => 'CrossProcessingColorTone',
+        RawConv => '$val == -1 ? undef : $val',
+        PrintConv => { 1 => 'Blue', 2 => 'Magenta', 3 => 'Yellow' },
     },
 );
 

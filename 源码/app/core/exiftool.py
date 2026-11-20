@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,26 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+# 行首的 "Error"/"Error:" 才是真失败; "[minor]" 之类的警告行不算。
+_WRITE_ERR_RE = re.compile(r"^\s*Error\b", re.MULTILINE)
+_WRITE_OK_RE = re.compile(r"(\d+)\s+image files?\s+(updated|created)", re.IGNORECASE)
+
+
+def _judge_write(text: str) -> bool:
+    """按 exiftool 的输出文本判定这次写入是否成功。"""
+    if not text:
+        return True
+    if _WRITE_ERR_RE.search(text):
+        return False
+    m = _WRITE_OK_RE.search(text)
+    if m is not None:
+        try:
+            return int(m.group(1)) > 0
+        except ValueError:
+            return True
+    # 其余(例如 "Nothing to do.") 不算失败, 由调用方读回校验兜底
+    return True
 
 
 def app_root() -> Path:
@@ -29,8 +50,25 @@ def app_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def find_exiftool() -> str | None:
-    """优先随程序附带的 exiftool, 其次 PATH, 最后常见安装目录。"""
+def _load_settings():
+    """惰性导入, 避免 core ← merge 在模块加载期循环。"""
+    from ..merge import settings as _s
+    return _s
+
+
+def find_exiftool(mode: str | None = None) -> str | None:
+    """优先用户自定义的 exiftool.exe, 其次随程序附带的, 再 PATH / 常见安装目录。
+
+    mode: None=读用户设置; "auto"=优先自定义再自动搜索; "local"=只用自定义。
+    """
+    s = _load_settings()
+    if mode is None:
+        mode = s.load_exiftool_mode()
+    custom = s.load_exiftool_path()
+    if custom and Path(custom).exists():
+        return custom
+    if mode == s.MODE_LOCAL:
+        return None
     here = Path(__file__).resolve().parents[2]
     for base in (app_root(), here):
         for rel in ("tools/exiftool.exe", "tools/exiftool"):
@@ -54,6 +92,18 @@ def find_exiftool() -> str | None:
                 return str(cand)
     win = Path("C:/Windows/exiftool.exe")
     return str(win) if win.exists() else None
+
+
+def refresh_exiftool():
+    """换过 exiftool 或更新过文件后调用: 关掉常驻进程, 下次用时按新路径重启。"""
+    with ExifTool._inst_lock:
+        inst = ExifTool._instance
+        ExifTool._instance = None
+    if inst is not None:
+        try:
+            inst.close()
+        except Exception:
+            pass
 
 
 class ExifToolError(RuntimeError):
@@ -94,32 +144,39 @@ class ExifTool:
             return "unknown"
 
     def start(self) -> None:
-        if self.running:
-            return
-        startupinfo = None
-        kwargs: dict = {}
-        if os.name == "nt":
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = 0
-            kwargs["startupinfo"] = startupinfo
-            kwargs["creationflags"] = _CREATE_NO_WINDOW
-        self._proc = subprocess.Popen(
-            [self.exe, "-stay_open", "True", "-@", "-", "-common_args", *self._common],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            **kwargs,
-        )
-        self._stderr.clear()
-        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
-        self._stderr_thread.start()
-        # 预热一次, 确保进程真的活着
-        try:
-            self.execute("-ver")
-        except Exception as exc:  # pragma: no cover
-            self._proc = None
-            raise ExifToolError(f"exiftool 启动失败: {exc}") from exc
+        # ⚠️ 整个启动过程在锁内 + 二次检查 running: execute() 里的
+        # `if not self.running: self.start()` 在锁外, 两个线程可能同时看到
+        # 未启动而各起一个进程(前一个泄漏)。这里保证只有一个真正启动。
+        # self._lock 是 RLock, restart()/execute() 持锁时再进来可重入。
+        with self._lock:
+            if self.running:
+                return
+            startupinfo = None
+            kwargs: dict = {}
+            if os.name == "nt":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+                kwargs["startupinfo"] = startupinfo
+                kwargs["creationflags"] = _CREATE_NO_WINDOW
+            self._proc = subprocess.Popen(
+                [self.exe, "-stay_open", "True", "-@", "-", "-common_args", *self._common],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                **kwargs,
+            )
+            self._stderr.clear()
+            self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+            self._stderr_thread.start()
+            # 预热一次, 确保进程真的活着。
+            # ⚠️ 必须 _retry=False: 若 exe 一启动就退出(配置错/损坏), 默认 retry 会
+            # 走 restart()→start()→execute("-ver")→再 retry ... 无限递归直到栈溢出。
+            try:
+                self.execute("-ver", _retry=False)
+            except Exception as exc:  # pragma: no cover
+                self._proc = None
+                raise ExifToolError(f"exiftool 启动失败: {exc}") from exc
 
     def _drain_stderr(self):
         proc = self._proc
@@ -246,8 +303,18 @@ class ExifTool:
         """提取内嵌二进制(如缩略图)。"""
         return self.execute("-b", f"-{tag}", path, binary=True)
 
-    def write(self, path: str, assignments: Sequence[tuple[str, str]], in_place: bool = False) -> str:
-        """写入字段。assignments 已按调用方要求的顺序排列。"""
+    def write(self, path: str, assignments: Sequence[tuple[str, str]],
+              in_place: bool = False) -> tuple[bool, str]:
+        """写入字段, 返回 (是否成功, 原始输出)。
+
+        v217: 以前调用方拿 `"error" in 输出.lower()` 判成败 —— 只要 exiftool 在
+        `[minor]` 警告里带了个 Error 字样就算失败(其实文件已改), 而真正的
+        "Error: ..." 行反而可能被 lowercase 后的其它词掩盖。这里按行首判定:
+          * 行首 `Error` → 失败;
+          * `N image files updated/created` 里 N == 0 → 失败(说明什么都没写);
+          * `Nothing to do` → 成功(值本来就对);
+          * 其余情况交给调用方的读回校验兜底。
+        """
         args: list[str] = []
         for key, value in assignments:
             args.append(f"-{key}={value}")
@@ -255,7 +322,8 @@ class ExifTool:
         args.append(path)
         out = self.execute_text(*args)
         err = self.last_error
-        return "\n".join(x for x in (out, err) if x).strip()
+        text = "\n".join(x for x in (out, err) if x).strip()
+        return _judge_write(text), text
 
 
 def get_exiftool() -> ExifTool:

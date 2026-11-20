@@ -1,13 +1,86 @@
 # -*- coding: utf-8 -*-
-"""自绘小部件: 胶囊开关 / 勾选框。"""
+"""自绘小部件: 胶囊开关 / 勾选框 / 就地编辑的点外部取消。"""
 from __future__ import annotations
 
-from PySide6.QtCore import QRect, QRectF, QSize, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QAbstractButton, QCheckBox, QRubberBand, QStyle,
-                               QStyleOptionButton)
+import os
+
+from PySide6.QtCore import (QEvent, QObject, QRect, QRectF, QSize, Qt, Signal)
+from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen)
+from PySide6.QtWidgets import (QAbstractButton, QApplication, QCheckBox, QLabel,
+                               QRubberBand, QSizePolicy, QStyle, QStyleOptionButton,
+                               QWidget, QWidgetAction)
 
 from . import theme as T
+
+
+def split_name_stem(current: str, path: str) -> tuple[str, str]:
+    """v194: 把显示名拆成「可编辑主名 + 只读后缀」。
+
+    后缀一律取**磁盘文件的真实扩展名**(用户定的口径), 不从显示名猜 ——
+    显示名在旧版本里可能被整名改过、后缀甚至被删掉了, 只有 path 是可信的。
+    返回 (stem, ext); ext 含点号(如 ".mp4"), 没有扩展名时为空串。
+    """
+    ext = os.path.splitext(path or "")[1]
+    stem = str(current or "")
+    if ext and stem.lower().endswith(ext.lower()):
+        stem = stem[:-len(ext)]
+    return stem, ext
+
+
+class OutsideClickWatcher(QObject):
+    """v193: 就地改名的输入框期间，「点输入框外面」一律放弃修改。
+
+    ⚠️ 只靠 `focusOutEvent` 不够: QListWidget 的 viewport / 自绘时间线默认不接
+       焦点, 点空白处时 QLineEdit 可能压根不失焦, 于是「点走」永远收不到信号。
+       这里在 QApplication 上临时挂一层过滤, 按「按下的控件是不是输入框自己
+       或它的子控件」判定, 与焦点策略无关; 输入框一关就摘掉, 不留全局钩子。
+    """
+
+    outsideClicked = Signal()
+
+    def __init__(self, edit: QWidget, parent=None):
+        super().__init__(edit)          # 生命周期跟随输入框
+        self._edit = edit
+        self._armed = False
+        self._extra: list[QWidget] = []      # v194: 后缀标签这类「看着属于输入框」的只读控件
+
+    def add_inside(self, w: QWidget | None):
+        """v194: 把只读后缀标签也算作输入框内部, 点它不该放弃编辑。"""
+        if w is not None and w not in self._extra:
+            self._extra.append(w)
+
+    def start(self):
+        if self._armed:
+            return
+        app = QApplication.instance()
+        if app is None:
+            return
+        self._armed = True
+        app.installEventFilter(self)
+
+    def stop(self):
+        if not self._armed:
+            return
+        self._armed = False
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.MouseButtonPress:
+            w = obj if isinstance(obj, QWidget) else None
+            ed = self._edit
+            if ed is not None and w is not None:
+                inside = False
+                while w is not None:
+                    if w is ed or w in self._extra:
+                        inside = True
+                        break
+                    w = w.parentWidget()
+                if not inside:
+                    self.outsideClicked.emit()
+                    self.stop()
+        return False                    # 事件照常发给原控件, 只做旁听
 
 
 class Marquee(QRubberBand):
@@ -26,7 +99,11 @@ class Marquee(QRubberBand):
     def paintEvent(self, event):
         p = QPainter(self)
         r = self.rect().adjusted(0, 0, -1, -1)
-        p.fillRect(r, QColor(T.ACCENT + "2B"))          # 半透明蓝底
+        # ⚠️ "#RRGGBBAA" 不是 Qt 认的写法(8 位会被当成 AARRGGBB → 框会变绿),
+        #    要半透明就老老实实 setAlpha
+        fill = QColor(T.ACCENT)
+        fill.setAlpha(43)
+        p.fillRect(r, fill)                             # 半透明蓝底
         p.setPen(QPen(QColor(T.ACCENT), 1))             # 蓝色实线边框
         p.setBrush(Qt.NoBrush)
         p.drawRect(r)
@@ -128,3 +205,146 @@ class CheckCheckBox(QCheckBox):
                 p.drawPath(tick)
                 p.restore()
         p.end()
+
+
+class ElidedLabel(QLabel):
+    """单行文字: 放得下才画,**不把窗口最小宽顶大**。
+
+    v211: 顶栏右侧状态文字用它。QLabel 默认按整串文字报最小宽, 一句
+    「已选中 1 张 / 共 1 张 · 没有待写入的改动」就能把窗口最小宽顶到 1742px,
+    连带把顶栏的统一参数条挤出屏幕。这里最小宽恒 0, 富余空间照吃。
+    v214: 宽度不够时不再画成"已…", 而是整条不画(详见 paintEvent)。
+    """
+
+    def __init__(self, text: str = "", parent=None,
+                 align=Qt.AlignRight | Qt.AlignVCenter):
+        super().__init__(text, parent)
+        self._align = align
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(0, super().minimumSizeHint().height())
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        fm = QFontMetrics(self.font())
+        p.setPen(self.palette().color(self.foregroundRole()))
+        txt = self.text()
+        # v214: 放不下就整条不画 —— 只剩一两个字 + "…"（如统一页顶栏被参数条挤满时
+        # 出现"已…"）比干脆留白更像出了故障。宁可整条不显示, 也不显示半截。
+        if (not txt or self.width() < 24
+                or fm.horizontalAdvance(txt) > self.width()):
+            p.end()
+            return
+        p.drawText(self.rect(), self._align, txt)
+        p.end()
+
+
+class BoldPartMenuAction(QWidgetAction):
+    """菜单项里只把某几个字加粗(QAction 只认纯文本, 局部加粗只能塞富文本标签)。
+
+    用法: BoldPartMenuAction(menu, "3个发送到", "剪辑")
+    标签设为"鼠标穿透", 点击/悬停仍由 QMenu 处理, triggered 正常发;
+    悬停时手动刷一层浅蓝底, 和其它项反馈一致。
+    """
+
+    def __init__(self, menu, prefix: str, bold_part: str, tip: str = ""):
+        super().__init__(menu)
+        self._lab = QLabel()
+        self._lab.setTextFormat(Qt.RichText)
+        self._lab.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._lab.setContentsMargins(14, 5, 26, 5)
+        self._lab.setStyleSheet("background: transparent; border-radius: 6px;")
+        self._lab.setText(
+            f'<span style="font-size:13px; color:{T.TEXT};">{prefix}'
+            f'<b>{bold_part}</b></span>')
+        # 纯文本给 QMenu 做宽度计算/无障碍用; 显示的是上面那个富文本标签
+        self.setText(f"{prefix}{bold_part}")
+        if tip:
+            self.setToolTip(tip)
+        self.setDefaultWidget(self._lab)
+        menu.hovered.connect(self._on_hovered)
+
+    def _on_hovered(self, act):
+        bg = T.ACCENT_SOFT if act is self else "transparent"
+        self._lab.setStyleSheet(f"background: {bg}; border-radius: 6px;")
+
+
+class DangerMenuAction(QWidgetAction):
+    """危险操作菜单项: 文字用红色(QAction 本身设不了颜色, 只能塞一个富文本标签)。
+
+    标签设为"鼠标穿透", 点击/悬停仍由 QMenu 自己处理, 所以 triggered 正常发;
+    悬停时手动给标签刷一层浅红底, 保持和其它项一致的反馈。
+    """
+
+    def __init__(self, menu, text: str):
+        super().__init__(menu)
+        self._menu = menu
+        self._text = text
+        self._lab = QLabel(text)
+        self._lab.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._lab.setContentsMargins(14, 5, 26, 5)
+        self._lab.setStyleSheet(f"color: {T.DANGER}; font-size: 13px;"
+                                " background: transparent; border-radius: 6px;")
+        self.setDefaultWidget(self._lab)
+        menu.hovered.connect(self._on_hovered)
+
+    def _on_hovered(self, act):
+        on = act is self
+        bg = T.DANGER_SOFT if on else "transparent"
+        self._lab.setStyleSheet(f"color: {T.DANGER}; font-size: 13px;"
+                                f" background: {bg}; border-radius: 6px;")
+
+# ------------------------------------------------------------------ 下拉弹层(v215)
+def prepare_combo_popup(combo):
+    """让下拉弹层只保留"一层圆角底"。
+
+    Qt 的弹层容器是 QComboBoxPrivateContainer(一个 QFrame): 它自己在整个窗口矩形里
+    铺一块**直角**底色, 我们再靠 QSS 给里面的 QAbstractItemView 画圆角边框 —— 结果
+    四角露出直角色, 看着就是"方底 + 圆角"两层背景叠在一起。
+    这里把容器设成透明/无系统背景, 并去掉系统投影(投影也是按方窗口画的), 只剩 view
+    自己画的那层圆角面板。⚠️ 只能在弹层第一次显示**之前**调用(设置属性会重建窗口)。
+    """
+    try:
+        view = combo.view()
+        pop = view.window()
+    except Exception:
+        return None
+    if pop is None or pop is combo:
+        return None
+    # ⚠️ 只设 WA_TranslucentBackground 不够: 容器还会把自己刷成一块**直角**白底
+    #    (那层"方底"就是它), 四角盖住圆角面板。实测 app 级 QSS 到不了这个弹层容器
+    #    (它是独立顶层窗口), 必须挂到它自己身上 —— 用带 #id 的选择器, 避免像裸写
+    #    `background: transparent` 那样连里面的 QListView 一起洗掉(列表会整个透明)。
+    pop.setObjectName("comboPopup")
+    pop.setStyleSheet("QFrame#comboPopup { background: transparent; border: none; }")
+    pop.setAttribute(Qt.WA_TranslucentBackground, True)
+    pop.setAttribute(Qt.WA_NoSystemBackground, True)
+    pop.setWindowFlag(Qt.FramelessWindowHint, True)
+    pop.setWindowFlag(Qt.NoDropShadowWindowHint, True)
+    st = pop.style()
+    st.unpolish(pop)
+    st.polish(pop)
+    return pop
+
+
+# 弹层比最长选项多留的宽度: 项左右内边距 10+10 + 视图 border/padding 1+1/4+4 + 余量 10
+POPUP_EXTRA_W = 40
+
+
+def fit_popup_width(combo):
+    """把弹层宽度撑到"最长选项完整放得下"。
+
+    v213 把控件宽度收到"刚好放下最长文案"后, 弹层宽度沿用控件宽度 → 项的文字区比
+    控件文字区还窄(项有 10+10 内边距, 视图再吃掉 4+4 padding 与 1+1 边框), 居中文字
+    就被省略号截成 "H.265 Main...10bit"。这里只放宽**弹层**, 控件本身宽度不动。
+    """
+    try:
+        view = combo.view()
+    except Exception:
+        return
+    if view is None or combo.count() == 0:
+        return
+    fm = combo.fontMetrics()
+    need = max(fm.horizontalAdvance(combo.itemText(i)) for i in range(combo.count()))
+    view.setMinimumWidth(max(combo.width(), need + POPUP_EXTRA_W))

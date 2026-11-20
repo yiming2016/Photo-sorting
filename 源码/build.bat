@@ -47,11 +47,27 @@ if not exist "..\out\dist_flat\照片排序台\照片排序台.exe" (
 )
 
 echo [4/4] 扁平化部署到 ..\软件（不再嵌套 照片排序台\ 子目录）...
+REM 必须先确认旧目录真的删掉了再 move: 否则 move 会把 照片排序台 塞进残留的 ..\软件 里,
+REM 变成 ..\软件\照片排序台\照片排序台.exe 这种嵌套结构, 而且外层还留着上一版的残缺文件。
 if exist "..\软件" rmdir /S /Q "..\软件"
+if exist "..\软件" (
+    echo 旧目录 ..\软件 删不掉（多半是程序还在运行、DLL 被占用），先重试一次...
+    timeout /t 2 /nobreak >nul
+    rmdir /S /Q "..\软件"
+)
+if exist "..\软件" (
+    echo 部署失败：..\软件 仍被占用，无法清空。请关闭正在运行的程序后重新打包。
+    echo 临时产物已保留在 ..\out\dist_flat，可直接手动部署。
+    goto :fail
+)
 move "..\out\dist_flat\照片排序台" "..\软件" >nul
 if exist "..\out\dist_flat" rmdir /S /Q "..\out\dist_flat"
 if not exist "..\软件\照片排序台.exe" (
     echo 部署失败：..\软件\照片排序台.exe 不存在
+    goto :fail
+)
+if not exist "..\软件\_internal\tools\exiftool.exe" (
+    echo 部署失败：..\软件\_internal\tools\exiftool.exe 不存在（ExifTool 没打进去）
     goto :fail
 )
 

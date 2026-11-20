@@ -13,15 +13,47 @@ import subprocess
 from typing import Iterable
 
 from PySide6.QtCore import QThread, QMutex, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QImage, QPixmap
 
 from .exiftool import ExifTool
 
 THUMB_SIZE = 360
+VIDEO_EXTS = {"mp4", "mov", "m4v", "avi", "mkv", "webm", "3gp", "3g2", "mts", "m2ts"}
 EMBEDDED_TAGS = ("ThumbnailImage", "PreviewImage", "JpgFromRaw", "OtherImage",
                  "PhotoshopThumbnail", "ThumbnailTIFF", "CoverArt")
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+
+def thumb_pixmap(path: str) -> QPixmap:
+    """同步取一张缩略图(鼠标悬浮预览用)。
+
+    顺序: 磁盘缓存 → QPixmap 直读(顺手落缓存) → Pillow/ffmpeg 解码落缓存。
+    失败时返回空 QPixmap(不是 None), 调用方用 isNull() 判断即可。
+    """
+    if not path or not os.path.exists(path):
+        return QPixmap()
+    try:
+        dest = os.path.join(cache_dir(), cache_key(path) + ".jpg")
+    except OSError:
+        dest = ""
+    if dest and os.path.exists(dest) and os.path.getsize(dest) > 0:
+        pix = QPixmap(dest)
+        if not pix.isNull():
+            return pix
+    pix = QPixmap(path)
+    if not pix.isNull():
+        if dest:
+            try:
+                pix.save(dest, "JPEG", 86)
+            except Exception:
+                pass
+        return pix
+    ext = os.path.splitext(path)[1].lower().lstrip(".")
+    ok = _decode_with_ffmpeg(path, dest) if ext in VIDEO_EXTS else _decode_with_pillow(path, dest)
+    if ok and dest and os.path.exists(dest):
+        return QPixmap(dest)
+    return QPixmap()
 
 
 def cache_dir() -> str:
@@ -88,9 +120,33 @@ def _decode_with_pillow(path: str, dest: str) -> bool:
         return False
 
 
-def _decode_with_ffmpeg(path: str, dest: str) -> bool:
+_FFMPEG_CACHE = []
+
+
+def _ffmpeg_exe():
+    """取 ffmpeg 路径: 先 PATH, 再退回合并模块的多路查找(winget 安装等)。
+
+    视频缩略图靠它, 所以不能只认 PATH —— 否则在本机(ffmpeg 装在 winget 目录、
+    没进 PATH)视频格子全变成"视频"占位文字。
+    """
+    if _FFMPEG_CACHE:
+        return _FFMPEG_CACHE[0]
     import shutil
     exe = shutil.which("ffmpeg")
+    if not exe:
+        try:
+            from ..merge.ffmpeg_locate import find_ffmpeg_pair
+            pair = find_ffmpeg_pair()
+            exe = pair[0] if pair else None
+        except Exception:
+            exe = None
+    if exe:
+        _FFMPEG_CACHE.append(exe)
+    return exe
+
+
+def _decode_with_ffmpeg(path: str, dest: str) -> bool:
+    exe = _ffmpeg_exe()
     if not exe:
         return False
     for seek in ("0.5", "0"):
@@ -112,9 +168,13 @@ def _decode_with_ffmpeg(path: str, dest: str) -> bool:
 
 
 class ThumbWorker(QThread):
-    """按顺序生成缩略图, 支持把指定路径提到队首。"""
+    """按顺序生成缩略图, 支持把指定路径提到队首。
 
-    thumbReady = Signal(str, QPixmap)
+    ⚠️ 信号里发 **QImage**: 这个线程生成的是跨线程对象, QPixmap 不能在工作线程
+    创建/传递(Qt 明确规定只能界面线程用)。界面线程收到后 `QPixmap.fromImage()`。
+    """
+
+    thumbReady = Signal(str, QImage)
     thumbFailed = Signal(str)
 
     def __init__(self, parent=None):
@@ -173,12 +233,12 @@ class ThumbWorker(QThread):
         if self._et:
             self._et.close()
 
-    def _make(self, path: str) -> QPixmap | None:
+    def _make(self, path: str) -> QImage | None:
         dest = os.path.join(cache_dir(), cache_key(path) + ".jpg")
         if os.path.exists(dest) and os.path.getsize(dest) > 0:
-            pix = QPixmap(dest)
-            if not pix.isNull():
-                return pix
+            img = QImage(dest)
+            if not img.isNull():
+                return img
         ok = False
         if self._et is not None:
             for tag in EMBEDDED_TAGS:
@@ -196,5 +256,6 @@ class ThumbWorker(QThread):
             } else "image"
             ok = _decode_with_ffmpeg(path, dest) if kind == "video" else _decode_with_pillow(path, dest)
         if ok and os.path.exists(dest):
-            return QPixmap(dest)
+            img = QImage(dest)
+            return img if not img.isNull() else None
         return None

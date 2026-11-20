@@ -37,6 +37,7 @@ class WriteResult:
     ok_files: list = field(default_factory=list)
     failed: list = field(default_factory=list)      # [(path, msg)]
     mismatches: list = field(default_factory=list)  # [(path, key, 期望, 实际)]
+    mismatch_paths: set = field(default_factory=set)  # v256: 读回不一致的文件, 不能标完成
     meta_updates: dict = field(default_factory=dict)  # path -> 写入后的完整元数据
 
 
@@ -51,16 +52,18 @@ def should_write(photo: Photo, target: str, fill_xmp: bool, fill_qt: bool) -> bo
     """
     if target in F.FILE_TIME_KEYS:
         return True
+    group = target.split(":", 1)[0].lower()
+    # 视频一律不写 EXIF: 即便文件里已经带着 EXIF 时间字段, 也只走 QuickTime。
+    # 必须放在 `target in photo.meta` 早返回之前, 否则视频自带的 EXIF 字段会被误放行。
+    if photo.kind == "video" and group.startswith(("exif", "ifd")):
+        return False
     if target in photo.meta:
         return True
-    group = target.split(":", 1)[0].lower()
     if photo.kind == "video":
         if group.startswith(("quicktime", "track", "media", "keys", "itemlist", "userdata")):
             return True
         if group.startswith("xmp"):
             return fill_xmp
-        if group.startswith(("exif", "ifd")):
-            return False
         return False
     # 图片
     if group.startswith(("exif", "ifd")):
@@ -99,6 +102,9 @@ def build_changes(photos: list[Photo], thorough: bool = False,
                 if key in touched or not F.is_datetime_value(val):
                     continue
                 if not F.writable(key):
+                    continue
+                # 视频不写 EXIF(与 should_write 一致): 只走 QuickTime / XMP
+                if photo.kind == "video" and key.split(":", 1)[0].lower().startswith(("exif", "ifd")):
                     continue
                 touched.add(key)
                 new = F.format_for(key, taken_dt, val)
@@ -163,7 +169,7 @@ class WriteWorker(QThread):
             return
 
         try:
-            snap = self._snapshot(et, by_file)
+            snap, unsafe = self._snapshot(et, by_file)
             self.result.snapshot_id = snap.id
             self.log.emit(f"已保存回滚快照 {snap.id}（{snap.file_count} 个文件 / "
                           f"{snap.change_count} 项）", LEVEL_INFO)
@@ -176,50 +182,92 @@ class WriteWorker(QThread):
                 done += 1
                 self.progress.emit(done, len(paths), os.path.basename(path))
                 items = by_file[path]
+                # v217: 写之前读不出元数据 = 快照里没有原值。这时候照写下去,
+                # 万一以后回滚, old=None 会被当成"原本没有"→ 把字段删掉。
+                # 所以这类文件直接不碰, 报出来让用户处理(通常是文件损坏/被独占)。
+                if path in unsafe:
+                    msg = "写入前读不到元数据(文件可能损坏或被占用)，已跳过以免无法回滚"
+                    self.result.failed.append((path, msg))
+                    self.log.emit(f"跳过 {os.path.basename(path)}: {msg}", LEVEL_ERROR)
+                    continue
                 assignments = sort_assignments([(c.key, c.new) for c in items])
                 try:
-                    err = et.write(path, assignments, in_place=self.in_place)
+                    ok_write, detail = et.write(path, assignments, in_place=self.in_place)
                 except Exception as exc:
                     self.result.failed.append((path, str(exc)))
                     self.log.emit(f"写入失败 {os.path.basename(path)}: {exc}", LEVEL_ERROR)
                     continue
-                if err and "error" in err.lower():
-                    self.result.failed.append((path, err.strip()))
-                    self.log.emit(f"写入异常 {os.path.basename(path)}: {err.strip()}", LEVEL_ERROR)
+                if not ok_write:
+                    self.result.failed.append((path, detail.strip() or "写入没有生效"))
+                    self.log.emit(f"写入异常 {os.path.basename(path)}: "
+                                  f"{detail.strip()}", LEVEL_ERROR)
                     continue
                 self._verify(et, path, items)
-                if not any(f[0] == path for f in self.result.failed):
+                # v256: 读回校验不一致的不算"完成"(否则"完成N个"把写错的也数进去)
+                if (not any(f[0] == path for f in self.result.failed)
+                        and path not in self.result.mismatch_paths):
                     self.result.ok_files.append(path)
         finally:
             et.close()
         self.finished_write.emit(self.result)
 
-    def _snapshot(self, et: ExifTool, by_file: dict) -> backup.Snapshot:
+    def _read_meta(self, et: ExifTool, path: str):
+        """读单个文件的元数据; 读不出返回 None(区别于"读到了但没这些字段")。"""
+        try:
+            records = et.read_json([path])
+        except Exception:
+            return None
+        want = os.path.normcase(os.path.abspath(path))
+        for rec in records:
+            src = rec.pop("SourceFile", None)
+            if src and os.path.normcase(os.path.abspath(src)) == want:
+                return rec
+        return None
+
+    def _snapshot(self, et: ExifTool, by_file: dict):
+        """落快照。返回 (snapshot, unsafe_paths)。
+
+        v217: 以前整批读失败就 `records=[]` → 所有 old 都是 None → 回滚时等于
+        "删掉字段"。文件本来有值, 回滚反而抹了它。现在:
+          * 整批失败 → 逐文件重试, 别让一个坏文件带走一整批的旧值;
+          * 单文件也读不出来 → 记进 unsafe, 写入时跳过它, 回滚也跳过它,
+            并在快照里标 `snapshot_ok=False` 留下证据。
+        """
         snap = backup.Snapshot(folder=self.folder)
         paths = list(by_file.keys())
         keys_by_path = {p: [c.key for c in by_file[p]] for p in paths}
+        unsafe: set[str] = set()
         for i in range(0, len(paths), 40):
             batch = paths[i:i + 40]
+            index = None
             try:
                 records = et.read_json(batch)
             except Exception:
-                records = []
-            index = {}
-            for rec in records:
-                src = rec.pop("SourceFile", None)
-                if src:
-                    index[os.path.normcase(os.path.abspath(src))] = rec
+                records = None
+            if records is not None:
+                index = {}
+                for rec in records:
+                    src = rec.pop("SourceFile", None)
+                    if src:
+                        index[os.path.normcase(os.path.abspath(src))] = rec
             for path in batch:
-                meta = index.get(os.path.normcase(os.path.abspath(path)), {})
+                key = os.path.normcase(os.path.abspath(path))
+                meta = index.get(key) if index is not None else None
+                if meta is None:
+                    meta = self._read_meta(et, path)     # 单文件重试
+                ok = meta is not None
+                if not ok:
+                    meta = {}
+                    unsafe.add(path)
                 old = {k: meta.get(k) for k in keys_by_path[path]}
                 try:
                     st = os.stat(path)
                     stat = (st.st_mtime, getattr(st, "st_birthtime", st.st_ctime))
                 except OSError:
                     stat = None
-                snap.add_file(path, old, stat)
+                snap.add_file(path, old, stat, ok=ok)
         snap.save()
-        return snap
+        return snap, unsafe
 
     def _verify(self, et: ExifTool, path: str, items: list[Change]):
         try:
@@ -240,12 +288,23 @@ class WriteWorker(QThread):
                 got = F.parse_dt(actual) if actual else None
                 if exp is None or got is None:
                     self.result.mismatches.append((path, c.key, c.new, str(actual)))
+                    self.result.mismatch_paths.add(path)
                     continue
                 if exp.timestamp() != got.timestamp():
                     self.result.mismatches.append((path, c.key, c.new, str(actual)))
+                    self.result.mismatch_paths.add(path)
             else:
                 if str(actual) != str(c.new):
                     self.result.mismatches.append((path, c.key, c.new, str(actual)))
+                    self.result.mismatch_paths.add(path)
+
+
+def should_mark_rolled_back(ok: list, failed: list) -> bool:
+    """只有'有成功项且无任何失败'才把快照标记为已回滚(v256)。
+
+    部分文件被占用/失败时保持快照'可用', 让用户能重试那几个失败的文件。
+    """
+    return bool(ok) and not bool(failed)
 
 
 class RollbackWorker(QThread):
@@ -278,19 +337,32 @@ class RollbackWorker(QThread):
                 if not path or not os.path.exists(path):
                     self.failed.append((path or "?", "文件不存在"))
                     continue
+                if entry.get("snapshot_ok", True) is False:
+                    # v217: 快照没记到原值(写入前读取失败) → 这里的 None 不能当
+                    # "原本没有"用, 否则回滚会把这个字段删掉。宁可跳过。
+                    self.failed.append(
+                        (path, "快照未记录该文件的原值（写入前读取失败），已跳过以免误删"))
+                    continue
                 assignments = sort_assignments(backup.build_assignments_for_rollback(entry))
                 try:
-                    et.write(path, assignments)
-                    self.ok.append(path)
+                    ok_write, detail = et.write(path, assignments)
+                    if ok_write:
+                        self.ok.append(path)
+                    else:
+                        self.failed.append((path, detail.strip() or "回滚没有生效"))
                 except Exception as exc:
                     self.failed.append((path, str(exc)))
         finally:
             et.close()
-        try:
-            snap.data["rolled_back"] = True
-            with open(self.snapshot_path, "w", encoding="utf-8") as f:
-                import json
-                json.dump(snap.data, f, ensure_ascii=False, indent=1)
-        except Exception:
-            pass
+        # v256: 只有全部文件都成功还原才标记"已回滚"。之前无论成功失败都写
+        # rolled_back=True → 部分文件被占用/失败后快照永久变灰不可再用, 用户
+        # 无法重试那几个失败的文件。失败时保持"可用", 下次还能再回滚。
+        if should_mark_rolled_back(self.ok, self.failed):
+            try:
+                snap.data["rolled_back"] = True
+                with open(self.snapshot_path, "w", encoding="utf-8") as f:
+                    import json
+                    json.dump(snap.data, f, ensure_ascii=False, indent=1)
+            except Exception:
+                pass
         self.finished_rollback.emit(self)

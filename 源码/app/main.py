@@ -10,7 +10,10 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from . import __version__
+from . import crashlog
 from .resources import app_resource
+from .ui import beep as beep_silencer
+from .ui import cursor as cursor_hand
 from .ui.main_window import MainWindow
 from .ui.theme import apply as apply_theme
 
@@ -37,6 +40,10 @@ def _consume_noactivate() -> bool:
 
 
 def main() -> int:
+    # 最先装崩溃日志: 之后任何闪退都能在日志里留下线索(打包成无控制台 exe 时尤其重要)
+    crashlog.install()
+    # v220: 关掉 Qt 那声"嘟"(控件的无效输入/快捷键撞车都会响, 用户以为是 bug)
+    beep_silencer.silence()
     if hasattr(Qt, "AA_EnableHighDpiScaling"):
         QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     if hasattr(Qt, "AA_UseHighDpiPixmaps"):
@@ -48,6 +55,8 @@ def main() -> int:
     app.setApplicationVersion(__version__)
     app.setOrganizationName("PhotoSort")
     apply_theme(app)
+    # v216: 全局「能点的地方一律小手」——装在建窗口之前, 之后每个新控件自动补光标
+    cursor_hand.install(app)
 
     window = MainWindow()
     # 不抢焦点模式: 显示但不激活(不影响用户正在用的窗口)

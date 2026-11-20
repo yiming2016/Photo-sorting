@@ -18,6 +18,13 @@ ACCENT_HOVER = "#2F5BDC"
 ACCENT_SOFT = "#EDF3FF"
 ACCENT_BORDER = "#A9C1FB"
 
+# 网格/列表的鼠标悬浮与选中底色(v220): 对齐 Windows 资源管理器 ——
+# 悬浮是浅蓝、选中再深一档, 两者一眼能分清"我只是划过"和"我真的勾上了"。
+# ⚠️ 以前悬浮是灰(#F3F5F8)、选中是更浅的 ACCENT_SOFT, 对比反了。
+HOVER_SOFT = "#E9F1FD"
+SEL_SOFT = "#C8DCFA"
+SEL_EDGE = "#9CBDF6"
+
 OK = "#1F9254"
 OK_SOFT = "#E8F6EE"
 WARN = "#C2740A"
@@ -29,8 +36,8 @@ THUMB_BG = "#EDF0F4"
 HEADER_BG = "#F7F9FC"
 
 # Tooltip: 与下方 QToolTip QSS 里的值保持一致, 给需要自定义弹窗的控件用
-TOOLTIP_BG = "#2B313B"
-TOOLTIP_FG = "#FFFFFF"
+TOOLTIP_BG = "#FFFFFF"
+TOOLTIP_FG = "#1A1A1A"
 
 FONT_FAMILY = "'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif"
 MONO_FAMILY = "'Cascadia Mono', 'Consolas', 'Menlo', monospace"
@@ -51,10 +58,17 @@ QWidget {{
 QMainWindow, QDialog {{
     background: {BG};
 }}
+/* ⚠️ 顶层窗口如果是**普通 QWidget**(比如剪辑的独立窗口), 上面两条都不匹配,
+   只剩 `QWidget [background: transparent]` —— 窗口底就是透明的, 直接透出桌
+   面/系统深色 → 看上去整个窗口变成"黑色主题"。`:window` 只挑顶层窗口, 子控件
+   照旧 transparent, 所以这一条专治"独立窗口发黑"。 */
+QWidget:window {{
+    background: {BG};
+}}
 QToolTip {{
-    background: #2B313B;
-    color: #FFFFFF;
-    border: none;
+    background: {TOOLTIP_BG};
+    color: {TOOLTIP_FG};
+    border: 1px solid #D8D8D8;
     padding: 6px 9px;
     border-radius: 6px;
     font-size: 14px;
@@ -112,6 +126,212 @@ QPushButton[flat="true"]:hover {{
     background: #EDF0F5;
     border: none;
 }}
+/* 分段选择按钮(合并面板的「无损/转码」): 选中态用浅蓝底 + 蓝字 */
+QPushButton[seg="true"] {{
+    padding: 6px 10px;
+}}
+QPushButton[seg="true"]:checked {{
+    background: {ACCENT_SOFT};
+    border-color: {ACCENT_BORDER};
+    color: {ACCENT};
+    font-weight: 600;
+}}
+QPushButton[seg="true"]:checked:hover {{
+    background: #E3EDFF;
+    border-color: {ACCENT};
+}}
+/* 顶栏形态切换滑块(排序/合并/统一): 灰轨道 + 细边 + 选中段实心蓝底白字。
+   ⚠️ 不要写 min-width: 会和 padding 叠加把按钮撑宽, 反过来溢出轨道裁掉选中块(v211)。
+   圆角: 轨道 9 = 内块 6 + 内边距 2 + 边框 1, 内外同心才不显脏。
+   v212: 顶栏是纯白(#FFFFFF), 原来的 #F1F3F8 几乎看不出这是一条「框」;
+   底色加深到 #E7EAF1 并补 1px #D5DBE5 细边, 明显但不至于压住里面的蓝块。 */
+#modeSwitch {{
+    background: #E7EAF1;
+    border: 1px solid #D5DBE5;
+    border-radius: 9px;
+    padding: 2px;
+}}
+QPushButton#modeBtn {{
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 0 13px;
+    min-height: 22px;
+    color: {TEXT_SUB};
+    font-size: 12px;
+}}
+QPushButton#modeBtn:hover {{
+    background: rgba(59, 107, 245, 0.09);
+    color: {TEXT};
+}}
+QPushButton#modeBtn:checked {{
+    background: {ACCENT};
+    color: #FFFFFF;
+    font-weight: 600;
+}}
+QPushButton#modeBtn:checked:hover {{
+    background: {ACCENT_HOVER};
+}}
+/* 合并面板顶部一行放「自动 + 无损 + 转码 + ⚙」四个, 定宽保证放得下 */
+QPushButton[seg="true"][narrow="true"] {{
+    min-width: 76px;
+    max-width: 76px;
+}}
+QPushButton#mergeAutoBtn {{
+    min-width: 56px;
+    max-width: 56px;
+}}
+QPushButton#mergeGearBtn {{
+    min-width: 34px;
+    max-width: 34px;
+    padding: 6px 2px;
+    font-size: 15px;
+}}
+/* 「无损」板块的「全选」三态: full=全蓝 / part=半蓝 / 无属性=灰(默认) */
+QPushButton[lossless="full"] {{
+    background: {ACCENT};
+    border-color: {ACCENT};
+    color: #FFFFFF;
+    font-weight: 600;
+}}
+QPushButton[lossless="full"]:hover {{
+    background: {ACCENT_HOVER};
+    border-color: {ACCENT_HOVER};
+}}
+QPushButton[lossless="part"] {{
+    background: {ACCENT_SOFT};
+    border-color: {ACCENT_BORDER};
+    color: {ACCENT};
+    font-weight: 600;
+}}
+QPushButton[lossless="part"]:hover {{
+    background: #E3EDFF;
+    border-color: {ACCENT};
+}}
+/* 「独立」板块的「全选」三态: full=全蓝 / part=半蓝 / 无属性=灰(默认) */
+QPushButton[solo="full"] {{
+    background: {ACCENT};
+    border-color: {ACCENT};
+    color: #FFFFFF;
+    font-weight: 600;
+}}
+QPushButton[solo="full"]:hover {{
+    background: {ACCENT_HOVER};
+    border-color: {ACCENT_HOVER};
+}}
+QPushButton[solo="part"] {{
+    background: {ACCENT_SOFT};
+    border-color: {ACCENT_BORDER};
+    color: {ACCENT};
+    font-weight: 600;
+}}
+QPushButton[solo="part"]:hover {{
+    background: #E3EDFF;
+    border-color: {ACCENT};
+}}
+
+/* ---------- 剪辑工具条(图标在上、文字在下) ---------- */
+QToolButton#tlTool {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    color: {TEXT_SUB};
+    font-size: 11px;
+    padding: 2px 0 3px 0;
+}}
+QToolButton#tlTool:hover {{
+    background: {ACCENT_SOFT};
+    border-color: {ACCENT_BORDER};
+    color: {ACCENT};
+}}
+QToolButton#tlTool:pressed {{
+    background: #D8E6FF;
+    border-color: {ACCENT};
+}}
+QToolButton#tlTool:disabled {{
+    background: transparent;
+    border-color: transparent;
+    color: {TEXT_WEAK};
+}}
+
+/* ---------- 剪辑页顶部返回栏 ---------- */
+QWidget#editTopBar {{
+    background: {SURFACE};
+    border-bottom: 1px solid {BORDER};
+}}
+QPushButton#editBackBtn {{
+    background: {SURFACE_ALT};
+    border: 1px solid {BORDER};
+    border-radius: 7px;
+    padding: 5px 12px;
+    color: {TEXT};
+    font-size: 12px;
+}}
+QPushButton#editBackBtn:hover {{
+    background: {ACCENT_SOFT};
+    border-color: {ACCENT};
+    color: {ACCENT};
+}}
+
+/* ---------- 磁吸 / 吸附 开关(选中=蓝底) ---------- */
+/* v150: 能点的就不用灰字 —— 灰字等于"点不了", 用户得先试着点一下才知道。
+   只有 disabled 才灰, 可用的一律正常深色文字。 */
+QPushButton#chipToggle {{
+    background: transparent;
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    padding: 3px 12px;
+    color: {TEXT};
+    font-size: 11px;
+}}
+QPushButton#chipToggle:hover {{
+    border-color: {ACCENT_BORDER};
+    color: {ACCENT};
+}}
+QPushButton#chipToggle:checked {{
+    background: {ACCENT_SOFT};
+    border-color: {ACCENT};
+    color: {ACCENT};
+    font-weight: 600;
+}}
+QPushButton#chipToggle:disabled {{
+    color: {TEXT_WEAK};
+    border-color: {BORDER};
+}}
+/* v188: 「组」只靠竖线分隔, 不给这一组套浅灰底框 */
+/* 截图范围(当前/选中/所有): 三个值都是两个字, 内边距收窄才装得下 */
+QPushButton#shotScope {{
+    background: transparent;
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    padding: 3px 4px;
+    color: {TEXT};
+    font-size: 11px;
+}}
+QPushButton#shotScope:hover {{
+    border-color: {ACCENT_BORDER};
+    color: {ACCENT};
+}}
+
+/* ---------- 快捷键面板里的键位(可点着改) ---------- */
+QPushButton#keyBtn {{
+    background: {SURFACE_ALT};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    padding: 5px 9px;
+    color: {TEXT};
+    font-size: 12px;
+}}
+QPushButton#keyBtn:hover {{
+    background: {ACCENT_SOFT};
+    border-color: {ACCENT};
+    color: {ACCENT};
+}}
+QPushButton#keyBtn[capturing="true"] {{
+    background: {ACCENT_SOFT};
+    border: 1px dashed {ACCENT};
+    color: {ACCENT};
+}}
 
 /* ---------- 输入 ---------- */
 QLineEdit, QSpinBox, QDoubleSpinBox, QDateTimeEdit, QDateEdit {{
@@ -141,6 +361,16 @@ QComboBox::drop-down {{
     border: none;
     width: 22px;
 }}
+/* 统一页顶栏的 4 个参数下拉(v213): 只收窄内边距与箭头区, 让框身贴着最长选项走。
+   ⚠️ 宽度不写在这里 —— 由 norm_page._fit_combo_width() 按"最长选项文字 + 装饰"现算,
+      换文案/改字体自动跟着变; QSS 里写死 min-width 会再次把框撑宽(v211 教训)。 */
+QComboBox#normCombo {{
+    padding: 6px 6px;
+}}
+QComboBox#normCombo::drop-down {{
+    border: none;
+    width: 16px;
+}}
 QComboBox QAbstractItemView {{
     background: {SURFACE};
     border: 1px solid {BORDER};
@@ -161,6 +391,33 @@ QComboBox QAbstractItemView::item:hover,
 QComboBox QAbstractItemView::item:selected {{
     background: {ACCENT_SOFT};
     color: {TEXT};
+}}
+/* ---------- 剪辑工具条上的截图区(v134) ---------- */
+/* 相机图标按钮: 只有图标, 所以必须 padding:0(主题默认 6px 14px 会把 32px 挤成负数) */
+QPushButton#shotBtn {{
+    background: {SURFACE};
+    border: 1px solid {BORDER_STRONG};
+    border-radius: 7px;
+    padding: 0px;
+}}
+QPushButton#shotBtn:hover {{
+    background: {ACCENT_SOFT};
+    border-color: {ACCENT};
+}}
+QPushButton#shotBtn:pressed {{
+    background: {ACCENT_SOFT};
+}}
+/* 格式下拉: 要窄。min-width 必须显式压掉全局的 80px */
+QComboBox#shotFmt {{
+    min-width: 0px;
+    padding: 0px 4px 0px 8px;
+    font-size: 12px;
+}}
+QComboBox#shotFmt::drop-down {{
+    width: 16px;
+    /* 只留宽，不画背景/边框、也不拼 border 三角：
+      · 写了 background/border → Qt 用它自己的盒子画，默认箭头彻底消失；
+      · 用 border 拼三角（width/height 归零）→ 只会剩一个 1px 的小方块。 */
 }}
 QCheckBox, QRadioButton {{
     spacing: 7px;
@@ -196,6 +453,13 @@ QListView, QTreeView, QTableView {{
     selection-background-color: {ACCENT_SOFT};
     selection-color: {TEXT};
 }}
+/* 空态页(还没放文件): 与「已经有文件」时的网格是同一张白卡 —— 同底色、同半径,
+   同一圈 1px 淡边。不然一加文件/一清空, 主区就从白卡跳成灰底一行字, 像换了块区域(v212)。 */
+QWidget#emptyPage {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+}}
 /* 顶栏/底栏: 用 ID 选择器只作用于 bar 本身, 不影响子控件 */
 QWidget#topbar {{
     background: {SURFACE};
@@ -208,6 +472,13 @@ QWidget#bottombar {{
 QTableView::item, QTreeView::item {{
     padding: 4px 6px;
     border: none;
+}}
+/* 选中行底色: 一旦给 ::item 写了 padding, 系统默认的选中高亮就不画了
+   (树上只剩左侧缩进区一小块蓝)。必须显式给 item:selected 底色,
+   配合视图的 SelectRows 行为, 选中才会铺满整行。 */
+QTableView::item:selected, QTreeView::item:selected {{
+    background: {ACCENT_SOFT};
+    color: {TEXT};
 }}
 QHeaderView::section {{
     background: {SURFACE_ALT};
@@ -250,6 +521,25 @@ QScrollBar::handle:hover {{ background: #B3BCCA; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 
+/* ---------- 缩放滑轨(v169) ---------- */
+QSlider#zoomSlider::groove:horizontal {{
+    height: 4px;
+    background: {BORDER_STRONG};
+    border-radius: 2px;
+}}
+QSlider#zoomSlider::sub-page:horizontal {{
+    background: {ACCENT_BORDER};
+    border-radius: 2px;
+}}
+QSlider#zoomSlider::handle:horizontal {{
+    width: 12px;
+    margin: -5px 0;
+    border-radius: 6px;
+    background: {ACCENT};
+}}
+QSlider#zoomSlider::handle:hover {{ background: {ACCENT_HOVER}; }}
+
+/* 音量拖动条的样式写在 _VolumeSlider 里(挂在控件本身才压得住原生灰底) */
 /* ---------- 分隔 ---------- */
 QSplitter::handle {{
     background: {BORDER};
@@ -259,7 +549,9 @@ QSplitter::handle {{
 QSplitter::handle:hover {{ background: {ACCENT_BORDER}; }}
 
 /* ---------- 菜单 ---------- */
-QMenu {{
+/* QMenu 也是顶层窗口, 会被上面 `QWidget:window` 抢成 {BG}; 这里用同特异性
+   的 `QMenu:window` 压它(写在后面才生效), 保住菜单的纯白底。 */
+QMenu, QMenu:window {{
     background: {SURFACE};
     border: 1px solid {BORDER};
     border-radius: 10px;
@@ -325,6 +617,19 @@ QProgressBar {{
 QProgressBar::chunk {{
     background: {ACCENT};
     border-radius: 5px;
+}}
+/* 合并面板的进度条: 要能在条内显示百分比, 所以比默认的 8px 高一些 */
+QProgressBar#mergeProgress {{
+    min-height: 18px;
+    max-height: 18px;
+    border-radius: 9px;
+    background: #E9EDF3;
+    font-size: 11px;
+    color: {TEXT_SUB};
+}}
+QProgressBar#mergeProgress::chunk {{
+    border-radius: 9px;
+    background: {ACCENT};
 }}
 
 /* ---------- 状态栏 ---------- */
@@ -392,7 +697,11 @@ def apply(app):
         radio_path = os.path.join(tempfile.gettempdir(), "photosort_radio.png")
         rpix.save(radio_path, "PNG")
         global QSS
-        QSS += f'\nQRadioButton::indicator:checked {{ image: url("{radio_path}"); }}'
+        # ⚠️ 路径里的反斜杠在 QSS 里是转义符(\U / \T 这种), 会让**整张样式表**
+        #    解析失败 —— Qt 只打一句 "Could not parse application stylesheet",
+        #    界面就等于裸奔。图片路径一律换成正斜杠。
+        qss_path = radio_path.replace("\\", "/")
+        QSS += f'\nQRadioButton::indicator:checked {{ image: url("{qss_path}"); }}'
     except Exception:
         pass
 

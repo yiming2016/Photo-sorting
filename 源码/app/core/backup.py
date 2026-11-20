@@ -60,8 +60,13 @@ class Snapshot:
     def data(self, value: dict):
         self._data = value
 
-    def add_file(self, path: str, old_values: dict, stat: tuple | None = None):
+    def add_file(self, path: str, old_values: dict, stat: tuple | None = None,
+                 ok: bool = True):
         entry = {"path": path, "fields": old_values}
+        if not ok:
+            # 写入前读不出元数据 → old_values 全是 None, 不能当"原本没有"用。
+            # 回滚时看到这个标记就跳过该文件(否则等于把字段删掉)。
+            entry["snapshot_ok"] = False
         if stat:
             entry["mtime"] = stat[0]
             entry["ctime"] = stat[1]

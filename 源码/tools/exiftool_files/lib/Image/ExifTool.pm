@@ -29,7 +29,7 @@ use vars qw($VERSION $RELEASE @ISA @EXPORT_OK %EXPORT_TAGS $AUTOLOAD @fileTypes
             %jpegMarker %specialTags %fileTypeLookup $testLen $exeDir
             %static_vars $advFmtSelf $configFile @configFiles $noConfig);
 
-$VERSION = '13.59';
+$VERSION = '13.64';
 $RELEASE = '';
 @ISA = qw(Exporter);
 %EXPORT_TAGS = (
@@ -410,6 +410,7 @@ my %createTypes = map { $_ => 1 } qw(XMP ICC MIE VRD DR4 EXIF EXV);
     MEF  => ['TIFF', 'Mamiya (RAW) Electronic Format'],
     MIE  => ['MIE',  'Meta Information Encapsulation format'],
     MIF  =>  'MIFF',
+    MIF3 => ['MOV',  'Multi-Image Format v3'], # (not an actual extension)
     MIFF => ['MIFF', 'Magick Image File Format'],
     MKA  => ['MKV',  'Matroska Audio'],
     MKS  => ['MKV',  'Matroska Subtitle'],
@@ -429,6 +430,7 @@ my %createTypes = map { $_ => 1 } qw(XMP ICC MIE VRD DR4 EXIF EXV);
     MQV  => ['MOV',  'Sony Mobile Quicktime Video'],
     MRC  => ['MRC',  'Medical Research Council image'],
     MRW  => ['MRW',  'Minolta RAW format'],
+    MSF3 => ['MOV',  'Multi-Sequence Format v3'], # (not an actual extension)
     MTS  =>  'M2TS',
     MXF  => ['MXF',  'Material Exchange Format'],
   # NDPI => ['TIFF', 'Hamamatsu NanoZoomer Digital Pathology Image'],
@@ -1186,6 +1188,7 @@ my @availableOptions = (
     [ 'PrintConv',        1,      'flag to enable print conversion' ],
     [ 'QuickTimeHandler', 1,      'flag to add mdir Handler to newly created Meta box' ],
     [ 'QuickTimePad',     undef,  'flag to preserve padding of QuickTime CR3 tags' ],
+    [ 'QuickTimeUndLang', undef,  'use 0x55c4 instead of 0x0000 for undefined language code' ],
     [ 'QuickTimeUTC',     undef,  'assume that QuickTime date/time tags are stored as UTC' ],
     [ 'RequestAll',       undef,  'extract all tags that must be specifically requested' ],
     [ 'RequestTags',      undef,  'extra tags to request (on top of those in the tag list)' ],
@@ -1923,8 +1926,8 @@ my %systemTagsNotes = (
     NewUUID => {
         Groups => { 0 => 'ExifTool', 1 => 'ExifTool', 2 => 'Other' },
         Notes => q{
-            generates a version 4 ("random"), variant 1 UUID as per RFC 9562, Section
-            5.4.  Not generated unless specifically requested or the API L<RequestAll|../ExifTool.html#RequestAll>
+            generates a version 4 "random", variant 1 UUID as per RFC 9562, Section 5.4.
+            Not generated unless specifically requested or the API L<RequestAll|../ExifTool.html#RequestAll>
             option is set
         },
         PrintConv => '$val =~ s/(.{8})(.{4})(.{4})(.{4})/$1-$2-$3-$4-/; $val',
@@ -6156,7 +6159,7 @@ sub GetByteOrder() { return $currentByteOrder; }
 #------------------------------------------------------------------------------
 # Set byte ordering
 # Inputs: 0) 'MM'=motorola, 'II'=intel (will translate 'BigEndian', 'LittleEndian')
-# Returns: 1 on success
+# Returns: previous byte-order setting on success, or false ("0") on failure
 sub SetByteOrder($)
 {
     my $order = shift;
@@ -6184,6 +6187,7 @@ sub SetByteOrder($)
         warn sprintf("Unknown native byte order! (pattern %x)\n",$val);
         return 0;
     }
+    my $oldOrder = $currentByteOrder;
     $currentByteOrder = $order;  # save current byte order
 
     # swap bytes if our native CPU byte ordering is not the same as the EXIF
@@ -6195,7 +6199,7 @@ sub SetByteOrder($)
     my $pack1d = pack('d', 1);
     $swapWords = ($pack1d eq "\0\0\x0f\xf3\0\0\0\0" or
                   $pack1d eq "\0\0\xf0\x3f\0\0\0\0");
-    return 1;
+    return $oldOrder;
 }
 
 #------------------------------------------------------------------------------
@@ -7280,7 +7284,7 @@ sub ProcessJPEG($$;$)
     my $req = $$self{REQ_TAG_LOOKUP};
     my $htmlDump = $$self{HTML_DUMP};
     my %dumpParms = ( Out => $out, Prefix => $$self{INDENT} );
-    my ($ch, $s, $length, $hash, $hashsize, $indent);
+    my ($ch, $s, $length, $hash, $hashsize, $indent, %xmth);
     my ($success, $wantTrailer, $trailInfo, $foundSOS, $gotSize, %jumbfChunk);
     my (@iccChunk, $iccChunkCount, $iccChunksTotal, @flirChunk, $flirCount, $flirTotal);
     my ($preview, $scalado, @dqt, $subSampling, $dumpEnd, %extendedXMP);
@@ -7288,7 +7292,9 @@ sub ProcessJPEG($$;$)
     ($indent = $$self{INDENT}) =~ s/  $//;
     unless ($raf) {
         $raf = File::RandomAccess->new($$dirInfo{DataPt});
-        $self->VerboseDir('JPEG', undef, length(${$$dirInfo{DataPt}}));
+        my $start = $$dirInfo{DirStart} || 0;
+        $raf->Seek($start, 0) if $start;
+        $self->VerboseDir('JPEG', undef, length(${$$dirInfo{DataPt}}) - $start);
     }
     # get pointer to hash object if it exists and we are the top-level JPEG or JP2
     if ($$self{FILE_TYPE} =~ /^(JPEG|JP2)$/ and not $$self{DOC_NUM}) {
@@ -7298,9 +7304,14 @@ sub ProcessJPEG($$;$)
     # check to be sure this is a valid JPG (or J2C, or EXV) file
     if ($raf->Read($s, 2) == 2 and $s =~ /^\xff[\xd8\x4f\x01]/) {
         undef $optionalTagTable;
-    } else {
-        return 0 unless $optionalTagTable and $s =~ /^\xff[\xe0-\xef]/;
-        $raf->Seek(-2, 1) or $self->Error('Seek error'), return 1;
+    } elsif ($optionalTagTable) {
+        if ($s =~ /^\xff[\xe0-\xef]/) {
+            $raf->Seek(-2, 1) or $self->Error('Seek error'), return 1;
+        } elsif ($$dirInfo{XiaomiMess} and $s eq "\0\0" and $raf->Read($s,2) == 2 and $s eq "\0\x0a") {
+            undef $optionalTagTable;    # (standard JPEG APP segments)
+        } else {
+            return 0;
+        }
     }
     if ($s eq "\xff\x01") {
         return 0 unless $raf->Read($s, 5) == 5 and $s eq 'Exiv2';
@@ -7353,7 +7364,7 @@ sub ProcessJPEG($$;$)
             # read up to next marker (JPEG markers begin with 0xff)
             my $buff;
             unless ($raf->ReadLine($buff)) {
-                last Marker unless $optionalTagTable;
+                last Marker unless $optionalTagTable or $$dirInfo{XiaomiMess};
                 $nextMarker = -1;
                 $success = 1;
                 last;
@@ -7361,10 +7372,23 @@ sub ProcessJPEG($$;$)
             $skipped = length($buff) - 1;
             # JPEG markers can be padded with unlimited 0xff's
             for (;;) {
-                $raf->Read($ch, 1) or last Marker;
-                $nextMarker = ord($ch);
-                last unless $nextMarker == 0xff;
-                ++$skipped;
+                if (not $raf->Read($ch, 1)) {
+                    last Marker unless $$dirInfo{XiaomiMess};
+                    $nextMarker = -1;
+                    $markerLenBytes{$nextMarker} = 0;
+                    $success = 1;
+                    last;
+                } else {
+                    $nextMarker = ord($ch);
+                    last unless $nextMarker == 0xff;
+                    ++$skipped;
+                }
+            }
+            # ignore any extra junk between segments in the Xiaomi mess
+            if ($skipped and $$dirInfo{XiaomiMess} and ($nextMarker == 0 or
+                $nextMarker == -1 or $marker == 0))
+            {
+                $skipped = 0;
             }
             # read segment data if it exists
             if (not defined $markerLenBytes{$nextMarker}) {
@@ -7473,6 +7497,9 @@ sub ProcessJPEG($$;$)
             }
             if ($foundSOS or $$self{FILE_TYPE} eq 'EXV') {
                 $success = 1;
+            } elsif ($$dirInfo{XiaomiMess}) {
+                $success = 1;
+                next;   # continue parsing APP segments after EOI (crazy I know!)
             } else {
                 $self->Warn('Missing JPEG SOS');
             }
@@ -7999,6 +8026,32 @@ sub ProcessJPEG($$;$)
                 # Digilife DDC-690/Rollei="BGTH"
                 $dumpType = 'Preview Image';
                 $preview = substr($$segDataPt, length($1));
+            } elsif ($$segDataPt =~ /^XMTH/) {
+                # APP2 XMTH segment in XiaomiMess of HEIC file
+                $dumpType = 'Xiaomi Preview';
+                if (%xmth) {
+                    $combinedSegData .= substr($$segDataPt, 4);
+                    ++$xmth{Count};
+                } elsif ($$segDataPt =~ /^XMTH.{5}\xff\xd8\xff\xe1/s) {
+                    $combinedSegData = substr($$segDataPt, 9);
+                    # Size includes JUNK (preview image trailer?)
+                    @xmth{'Size','Num'} = unpack('x4NC', $$segDataPt);
+                    $xmth{Count} = 1;
+                } else {
+                    $dumpType = 'Xiaomi Junk';
+                }
+                if (%xmth) {
+                    $tip = "Segment $xmth{Count} of $xmth{Num}\nTotal Size: $xmth{Size}";
+                    if ($xmth{Count} == $xmth{Num}) {
+                        if ($xmth{Size} != length($combinedSegData)) {
+                            $self->Warn('Size error reding Xiaomi Preview');
+                        } else {
+                            $self->FoundTag('PreviewImage', $combinedSegData);
+                        }
+                        undef $combinedSegData;
+                        undef %xmth;
+                    }
+                }
             } elsif ($$segDataPt =~ /^urn:/) {  # (found in Apple HDR images)
                 $dumpType = 'URN';
                 $useJpegMain = 1;
@@ -8336,8 +8389,10 @@ sub ProcessJPEG($$;$)
                     $self->Warn('Invalid JUMBF segment');
                 } elsif (defined $jumbfChunk{$type}[$seq] and length $jumbfChunk{$type}[$seq]) {
                     $self->Warn('Duplicate JUMBF sequence number');
+                } elsif ($seq > 10000) {
+                    $self->Warn('Invalid JUMBF sequence number');
                 } else {
-                    $seq or $self->Warn('Incorrect JUMBF sequence numbering (should start from 0, not 1)');
+                    $seq or $self->Warn('Incorrect JUMBF sequence numbering (should start from 1, not 0)');
                     # add to list of JUMBF chunks
                     $jumbfChunk{$type}[$seq] = substr($$segDataPt, 8 + $hdrLen);
                     # check to see if we have a complete JUMBF box
@@ -9284,7 +9339,9 @@ sub AddTagToTable($$;$$)
 # Returns: tag key or undef if tag not found
 # Notes: if value is not defined, it is extracted from DataPt using TagInfo
 #        Format and Count if provided
-# - set MakeTagInfo to add tag info for unknown tags with name made from tag ID
+# - set MakeTagInfo to 1 to add tag info for new tags with name made from tag ID,
+#   or 2 to add only if Unknown option is set
+# 
 sub HandleTag($$$$;%)
 {
     my ($self, $tagTablePtr, $tag, $val, %parms) = @_;
@@ -9307,14 +9364,16 @@ sub HandleTag($$$$;%)
     }
     if ($tagInfo) {
         $subdir = $$tagInfo{SubDirectory};
-    } elsif ($parms{MakeTagInfo}) {
-        $self->VPrint(0, $$self{INDENT}, "[adding $tag]\n") if $verbose;
+    } elsif ($parms{MakeTagInfo} and ($parms{MakeTagInfo} eq '1' or $verbose or $$self{OPTIONS}{Unknown})) {
+        $self->VPrint(0, $$self{INDENT}, "[adding $tag]\n") if $verbose and $parms{MakeTagInfo} eq '1';
         my $name = $tag;
         $name =~ s/([A-Z]) ([A-Z][ A-Z])/${1}_$2/g; # underline between acronyms
         $name =~ s/([^A-Za-z])([a-z])/$1\u$2/g;     # capitalize words
+        $name =~ s/([a-z])_([A-Z])/$1$2/g;          # remove unnecessary underlines
         $name =~ tr/-_a-zA-Z0-9//dc;                # remove illegal characters
         $name = "Tag$name" if length($name) < 2 or $name =~ /^[-0-9]/;
         $tagInfo = { Name => ucfirst($name) };
+        $$tagInfo{Unknown} = 1 unless $parms{MakeTagInfo} eq '1';
         AddTagToTable($tagTablePtr, $tag, $tagInfo);
     } else {
         return undef unless $verbose;
@@ -9336,7 +9395,7 @@ sub HandleTag($$$$;%)
             } elsif (not $$tagInfo{ByteOrder}) {
                 $val = ReadValue($dataPt, $start, $format, $$tagInfo{Count}, $size, \$rational);
             } else {
-                my $oldOrder = GetByteOrder(), SetByteOrder($$tagInfo{ByteOrder});
+                my $oldOrder = SetByteOrder($$tagInfo{ByteOrder});
                 $val = ReadValue($dataPt, $start, $format, $$tagInfo{Count}, $size, \$rational);
                 SetByteOrder($oldOrder);
             }
@@ -10061,7 +10120,7 @@ sub ProcessBinaryData($$$)
                 $offAdj = sprintf("$$self{INDENT}\[offsets adjusted by ${sign}0x%.4x after 0x%.4x $$tagInfo{Name}]\n", $tmp, $index);
             }
         }
-        if ($unknown > 1) {
+        if ($unknown > 1 and not $$tagInfo{LookAhead}) {
             # calculate next valid index for unknown tag
             my $ni = int $index;
             $ni += (($formatSize{$format} || 1) * $count) / $increment unless $wasVar;
